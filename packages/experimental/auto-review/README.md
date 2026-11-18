@@ -43,6 +43,18 @@ Remove the layer through the same CLI:
 pnpm dsh plugin --profile web remove @deepseek-ai/dsh-experimental-auto-review
 ```
 
+### Denial-reason language
+
+By default (`reasonLanguage: auto`), the reviewer writes an optional denial `reason` in the language of the latest user instruction, falling back to English when that language is unclear. Pin one language with a BCP 47 tag in the profile patch:
+
+```yaml
+- id: auto-review
+  config:
+    reasonLanguage: zh-CN
+```
+
+This changes only the free-text `reason`. The `risk` and `decision` keys, the JSON shape, the localized approval card, and the raw reason retained for audit are unchanged.
+
 <a id="headless-supervision"></a>
 ### Headless supervision
 

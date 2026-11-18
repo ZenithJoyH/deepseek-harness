@@ -30,6 +30,7 @@ import {
   type ToolSchema,
 } from '@deepseek-ai/dsh-llm'
 import { deepFreeze } from '@deepseek-ai/dsh-util-values'
+import z from '@deepseek-ai/schemastery'
 import { AUTO_PRESET } from '@deepseek-ai/dsh-permission-presets'
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-subagent'
@@ -49,6 +50,24 @@ const AUTO_REVIEW_DENIED_CODE = 'AUTO_REVIEW_DENIED'
 const AUTO_REVIEW_FAILED_ERROR_NAME = 'AutoReviewFailedError'
 /** Structured error code persisted when review cannot produce a decision. */
 const AUTO_REVIEW_FAILED_CODE = 'AUTO_REVIEW_FAILED'
+
+/** Accepted denial-reason language: `auto` follows the latest user instruction, otherwise a BCP 47 tag. */
+const REASON_LANGUAGE_PATTERN = /^(?:auto|[a-zA-Z]{2,8}(?:-[a-zA-Z0-9]{1,8})*)$/u
+
+/** Deployment-owned Auto review choices. */
+export interface Config {
+  /**
+   * Language for the reviewer's optional denial `reason`: `auto` follows the
+   * latest user-instruction message, or a BCP 47 tag such as `zh-CN` pins one
+   * language. JSON keys and decision values are never localized.
+   */
+  reasonLanguage?: string
+}
+
+/** Validated Auto review configuration. */
+export const Config: z<Config> = z.object({
+  reasonLanguage: z.string().pattern(REASON_LANGUAGE_PATTERN).default('auto'),
+})
 
 /** Fixed policy sent as the review request's system prompt. */
 const REVIEW_POLICY = `REVIEW_POLICY
@@ -75,6 +94,18 @@ Every retained history item has one source role. The assigned role governs autho
 Judge the pending action by what its tool and arguments will actually do. The exact session-created cleanup exception does not cover pre-existing objects or broader deletion. Listed medium and high effects take precedence over ordinary low-risk project work; a production read is medium even though it is read-only, and sensitive exfiltration is high even with explicit authorization. Fail closed when actual effects are ambiguous or broader than established scope. Deny a medium action if authorization of its action, target, scope, effect, count or duration is missing, conflicting, ambiguous, broader than the active instructions, or based only on constraints, checkpoints or facts. A later user or direct-parent instruction resolves an earlier conflict only when it explicitly revokes or replaces it; direct-parent instructions never override user restrictions.
 
 For any allow, end with exactly the applicable two-member object and nothing else. In particular, when a medium action is allowed, the complete text must be exactly {"risk":"medium","decision":"allow"}. Do not add reason, explanation, labels, Markdown, or surrounding prose. Stop immediately after the closing brace.`
+
+/**
+ * Add the denial-reason language rule to the fixed policy.
+ * @param reasonLanguage - `auto` or a validated BCP 47 language tag.
+ * @returns the complete reviewer system prompt.
+ */
+function reviewPolicy(reasonLanguage: string): string {
+  const clause = reasonLanguage === 'auto'
+    ? 'Write the optional "reason" in the natural language of the latest user-instruction message in the retained history. If that language is unclear or mixed, use English.'
+    : `Write the optional "reason" in the language identified by the BCP 47 tag "${reasonLanguage}".`
+  return `${REVIEW_POLICY}\n\n${clause} This rule changes only the reason text: keep every JSON key and decision value exactly as specified above.`
+}
 
 /** A parsed reviewer risk classification and decision. */
 type AutoReviewDecision =
@@ -673,6 +704,7 @@ async function classifyRisk(
   exec: ToolExecution,
   signal: AbortSignal,
   shown: ShownSchemas,
+  reasonLanguage: string,
 ): Promise<AutoReviewDecision> {
   const cwd = await ctx.workingDirectory.ensure(agent, signal)
   const snapshot = snapshotAutoReview(agent, exec, cwd, shown)
@@ -682,7 +714,7 @@ async function classifyRisk(
   const options: GenerateOptions = deepFreeze({
     provider: snapshot.provider,
     model: snapshot.model,
-    system: REVIEW_POLICY,
+    system: reviewPolicy(reasonLanguage),
     messages: reviewMessages(snapshot),
     temperature: 0,
     sessionId: agent.session.id,
@@ -729,7 +761,7 @@ function failed(exec: ToolExecution, error: unknown): PreToolDecision {
 }
 
 /** Install the Auto preset and its review gate; preserve Session selection on application shutdown. */
-export function apply(ctx: Context): void {
+export function apply(ctx: Context, config: Config): void {
   // Retain the injected service while this context drains on disposal.
   const permissionPresets = ctx.permissionPresets
   let accepting = true
@@ -759,7 +791,7 @@ export function apply(ctx: Context): void {
           shown = new Map()
           shownBySession.set(agent.session, shown)
         }
-        const review = await classifyRisk(ctx, agent, exec, signal, shown).then(
+        const review = await classifyRisk(ctx, agent, exec, signal, shown, config.reasonLanguage ?? 'auto').then(
           decision => ({ ok: true as const, decision }),
           (error: unknown) => ({ ok: false as const, error }),
         )

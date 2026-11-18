@@ -43,6 +43,18 @@ CLI 会在需要时初始化 profile，并将本包声明的 patch 追加到 bas
 pnpm dsh plugin --profile web remove @deepseek-ai/dsh-experimental-auto-review
 ```
 
+### 拒绝理由语言
+
+默认（`reasonLanguage: auto`）下，reviewer 会按最近一条用户指令的语言书写可选的拒绝 `reason`；语言不明确时回退英文。可在 profile patch 中用 BCP 47 标签固定一种语言：
+
+```yaml
+- id: auto-review
+  config:
+    reasonLanguage: zh-CN
+```
+
+该配置只影响自由文本 `reason`；`risk`、`decision` 等 JSON 键与结构、本地化审批卡片，以及保留用于审计的原始理由都不变。
+
 <a id="headless-supervision"></a>
 ### Headless supervision
 

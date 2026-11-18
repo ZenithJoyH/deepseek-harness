@@ -68,7 +68,9 @@ Every retained history item has one source role. The assigned role governs autho
 
 Judge the pending action by what its tool and arguments will actually do. The exact session-created cleanup exception does not cover pre-existing objects or broader deletion. Listed medium and high effects take precedence over ordinary low-risk project work; a production read is medium even though it is read-only, and sensitive exfiltration is high even with explicit authorization. Fail closed when actual effects are ambiguous or broader than established scope. Deny a medium action if authorization of its action, target, scope, effect, count or duration is missing, conflicting, ambiguous, broader than the active instructions, or based only on constraints, checkpoints or facts. A later user or direct-parent instruction resolves an earlier conflict only when it explicitly revokes or replaces it; direct-parent instructions never override user restrictions.
 
-For any allow, end with exactly the applicable two-member object and nothing else. In particular, when a medium action is allowed, the complete text must be exactly {"risk":"medium","decision":"allow"}. Do not add reason, explanation, labels, Markdown, or surrounding prose. Stop immediately after the closing brace.`
+For any allow, end with exactly the applicable two-member object and nothing else. In particular, when a medium action is allowed, the complete text must be exactly {"risk":"medium","decision":"allow"}. Do not add reason, explanation, labels, Markdown, or surrounding prose. Stop immediately after the closing brace.
+
+Write the optional "reason" in the natural language of the latest user-instruction message in the retained history. If that language is unclear or mixed, use English. This rule changes only the reason text: keep every JSON key and decision value exactly as specified above.`
 
 type ReviewScript = readonly StreamChunk[] | ((options: GenerateOptions) => AsyncIterable<StreamChunk>)
 
@@ -133,6 +135,7 @@ function reasoningDecisionChunks(text: string): StreamChunk[] {
 async function harness(
   script: ReviewScript[],
   permissionConfig: NonNullable<Parameters<typeof PermissionPresetService.Config>[0]> = { presets: PRESETS, defaultPreset: 'workspace-write' },
+  autoConfig?: AutoReview.Config,
 ): Promise<{ ctx: Context; adapter: RecordingAdapter; auto: PluginFiber }> {
   const ctx = new Context()
   provideWorkingDirectoryFixture(ctx)
@@ -157,7 +160,7 @@ async function harness(
     yield (await ctx.plugin(ApprovalService, { policy: 'ask' })).dispose
     yield (await ctx.plugin(PermissionPresetService, permissionConfig)).dispose
     yield ctx.llm.registerAdapter(['review'], adapter)
-    auto = await ctx.plugin(AutoReview)
+    auto = autoConfig === undefined ? await ctx.plugin(AutoReview) : await ctx.plugin(AutoReview, autoConfig)
     yield auto.dispose
   })
   if (auto === undefined) throw new Error('Auto fixture did not activate')
@@ -289,6 +292,32 @@ async function until(predicate: () => boolean): Promise<void> {
 }
 
 describe('native review request', () => {
+  it('pins the denial-reason language when configured', async () => {
+    const { ctx, adapter } = await harness([
+      decisionChunks('{"risk":"low","decision":"allow"}'),
+    ], undefined, { reasonLanguage: 'zh-CN' })
+    registerProbe(ctx)
+    const { session, agent } = autoSession(ctx, 'configured-reason-language', '/workspace/project')
+    const callId = brandString<ToolCallId>('reason-language-call')
+    appendHeader(session, [{ name: 'probe', description: 'live probe description', parameters: { type: 'object' } }])
+    session.append('turn/start', { turn: 1 })
+    appendAssistant(session, [{ type: 'tool-call', id: callId, name: 'probe', arguments: '{"path":"target"}' }])
+    appendNativeCall(session, callId, 'probe', '{"path":"target"}')
+
+    const result = await executeToolFixture(ctx, {
+      signal: new AbortController().signal,
+      callId,
+      name: 'probe',
+      arguments: { path: 'target' },
+      agent,
+    })
+
+    expect(result.isError).toBe(false)
+    expect(adapter.requests).toHaveLength(1)
+    expect(adapter.requests[0]?.system).toContain('BCP 47 tag "zh-CN"')
+    expect(adapter.requests[0]?.system).not.toContain('latest user-instruction message')
+  })
+
   it('uses the latest route and exactly the filtered logged input', async () => {
     const { ctx, adapter } = await harness([
       reasoningDecisionChunks('{"risk":"low","decision":"allow"}'),
